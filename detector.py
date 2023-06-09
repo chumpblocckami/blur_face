@@ -5,7 +5,7 @@ import numpy as np
 
 
 class YOLOv8_face:
-    def __init__(self, path, conf_thres=0.2, iou_thres=0.5, blur=True):
+    def __init__(self, path, conf_thres=0.2, iou_thres=0.5, show_keypoint: bool = False):
         self.conf_threshold = conf_thres
         self.iou_threshold = iou_thres
         self.class_names = ['face']
@@ -21,7 +21,7 @@ class YOLOv8_face:
         self.feats_hw = [(math.ceil(self.input_height / self.strides[i]), math.ceil(self.input_width / self.strides[i]))
                          for i in range(len(self.strides))]
         self.anchors = self.make_anchors(self.feats_hw)
-        self.blur = True
+        self.show_keypoint = show_keypoint
 
     def make_anchors(self, feats_hw, grid_cell_offset=0.5):
         """Generate anchors from features."""
@@ -69,11 +69,6 @@ class YOLOv8_face:
         blob = cv2.dnn.blobFromImage(input_img)
         self.net.setInput(blob)
         outputs = self.net.forward(self.net.getUnconnectedOutLayersNames())
-        # if isinstance(outputs, tuple):
-        #     outputs = list(outputs)
-        # if float(cv2.__version__[:3])>=4.7:
-        #     outputs = [outputs[2], outputs[0], outputs[1]] ###opencv4.7需要这一步，opencv4.5不需要
-        # Perform inference on the image
         det_bboxes, det_conf, det_classid, landmarks = self.post_process(outputs, scale_h, scale_w, padh, padw)
         return det_bboxes, det_conf, det_classid, landmarks
 
@@ -85,9 +80,8 @@ class YOLOv8_face:
 
             box = pred[..., :self.reg_max * 4]
             cls = 1 / (1 + np.exp(-pred[..., self.reg_max * 4:-15])).reshape((-1, 1))
-            kpts = pred[..., -15:].reshape((-1, 15))  ### x1,y1,score1, ..., x5,y5,score5
+            kpts = pred[..., -15:].reshape((-1, 15))
 
-            # tmp = box.reshape(self.feats_hw[i][0], self.feats_hw[i][1], 4, self.reg_max)
             tmp = box.reshape(-1, 4, self.reg_max)
             bbox_pred = self.softmax(tmp, axis=-1)
             bbox_pred = np.dot(bbox_pred, self.project).reshape((-1, 4))
@@ -98,7 +92,7 @@ class YOLOv8_face:
             kpts[:, 1::3] = (kpts[:, 1::3] * 2.0 + (self.anchors[stride][:, 1].reshape((-1, 1)) - 0.5)) * stride
             kpts[:, 2::3] = 1 / (1 + np.exp(-kpts[:, 2::3]))
 
-            bbox -= np.array([[padw, padh, padw, padh]])  ###合理使用广播法则
+            bbox -= np.array([[padw, padh, padw, padh]])
             bbox *= np.array([[scale_w, scale_h, scale_w, scale_h]])
             kpts -= np.tile(np.array([padw, padh, 0]), 5).reshape((1, 15))
             kpts *= np.tile(np.array([scale_w, scale_h, 1]), 5).reshape((1, 15))
@@ -112,12 +106,12 @@ class YOLOv8_face:
         landmarks = np.concatenate(landmarks, axis=0)
 
         bboxes_wh = bboxes.copy()
-        bboxes_wh[:, 2:4] = bboxes[:, 2:4] - bboxes[:, 0:2]  ####xywh
+        bboxes_wh[:, 2:4] = bboxes[:, 2:4] - bboxes[:, 0:2]
         classIds = np.argmax(scores, axis=1)
-        confidences = np.max(scores, axis=1)  ####max_class_confidence
+        confidences = np.max(scores, axis=1)
 
         mask = confidences > self.conf_threshold
-        bboxes_wh = bboxes_wh[mask]  ###合理使用广播法则
+        bboxes_wh = bboxes_wh[mask]
         confidences = confidences[mask]
         classIds = classIds[mask]
         landmarks = landmarks[mask]
@@ -147,27 +141,22 @@ class YOLOv8_face:
         return np.stack([x1, y1, x2, y2], axis=-1)
 
     def draw_detections(self, image, boxes, scores, kpts):
-        image_blurred = cv2.GaussianBlur(image, (23, 23), 30)  # cv2.medianBlur(image, 99)
+        image_blurred = cv2.GaussianBlur(image, (23, 23), 30)
         for box, score, kp in zip(boxes, scores, kpts):
             x, y, w, h = box.astype(int)
-            if self.blur:
-                try:
-                    p1 = (x, y)
-                    p2 = (p1[0] + w, p1[1] + h)
-                    circle_center = ((p1[0] + p2[0]) // 2, (p1[1] + p2[1]) // 2)
-                    circle_radius = int(int(math.sqrt(w * w + h * h) // 2) * 0.9)
-                    mask_img = np.zeros(image.shape, dtype='uint8')
-                    cv2.circle(mask_img, circle_center, circle_radius, (255, 255, 255), -1)
+            try:
+                p1 = (x, y)
+                p2 = (p1[0] + w, p1[1] + h)
+                circle_center = ((p1[0] + p2[0]) // 2, (p1[1] + p2[1]) // 2)
+                circle_radius = int(int(math.sqrt(w * w + h * h) // 2) * 0.9)
+                mask_img = np.zeros(image.shape, dtype='uint8')
+                cv2.circle(mask_img, circle_center, circle_radius, (255, 255, 255), -1)
 
-                    image = np.where(mask_img > 0, image_blurred, image)
-                    # roi = cv2.GaussianBlur(image[y:y + h, x:x + w], (23, 23), 30)
-                    # image[y:y + roi.shape[0], x:x + roi.shape[1]] = roi
-                except Exception as e:
-                    print(e)
-            else:
-                cv2.rectangle(image, (x, y), (x + w, y + h), (0, 0, 255), thickness=3)
+                image = np.where(mask_img > 0, image_blurred, image)
+            except Exception as e:
+                print(e)
 
-            ##visualize keypoints
-            # for i in range(5):
-            #    cv2.circle(image, (int(kp[i * 3]), int(kp[i * 3 + 1])), 4, (255, 255, 255), thickness=-1)
+            if self.show_keypoint:
+                for i in range(5):
+                    cv2.circle(image, (int(kp[i * 3]), int(kp[i * 3 + 1])), 4, (255, 255, 255), thickness=-1)
         return image
